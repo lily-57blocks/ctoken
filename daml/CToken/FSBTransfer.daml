@@ -1,0 +1,81 @@
+-- | FSB transfer instruction and factory implementing CIP-56
+-- TransferInstruction and TransferFactory interfaces for FOP transfers.
+module CToken.FSBTransfer where
+
+import DA.Assert ((===))
+
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.TransferInstructionV1
+
+import CToken.FSBHolding (FSBHolding(..))
+
+-- | Factory contract enabling anyone to initiate FOP transfers of FSB.
+-- One factory is created per registry and lives for the lifetime of the registry.
+template FSBTransferFactory
+  with
+    admin : Party
+  where
+    signatory admin
+
+    interface instance TransferFactory for FSBTransferFactory where
+      view = TransferFactoryView with
+        admin
+        meta = emptyMetadata
+
+      transferFactory_publicFetchImpl _self TransferFactory_PublicFetch{expectedAdmin} = do
+        expectedAdmin === admin
+        pure $ view (toInterface @TransferFactory this)
+
+      transferFactory_transferImpl _self TransferFactory_Transfer{expectedAdmin, transfer, ..} = do
+        expectedAdmin === admin
+        let Transfer{sender, receiver, amount, instrumentId, inputHoldingCids, ..} = transfer
+        assertMsg "Instrument admin mismatch" (instrumentId.admin == admin)
+        assertMsg "Instrument id must be FSB" (instrumentId.id == "FSB")
+
+        -- consume input holdings and sum their amounts
+        inputTotal <- consumeHoldings admin inputHoldingCids
+
+        assertMsg "Insufficient input holdings" (inputTotal >= amount)
+
+        -- create receiver holding
+        receiverCid <- toInterfaceContractId <$>
+          create FSBHolding with
+            admin
+            owner = receiver
+            amount
+            lock = None
+            meta = emptyMetadata
+
+        -- create sender change if any
+        senderChangeCids <-
+          if inputTotal > amount
+          then do
+            changeCid <- toInterfaceContractId <$>
+              create FSBHolding with
+                admin
+                owner = sender
+                amount = inputTotal - amount
+                lock = None
+                meta = emptyMetadata
+            pure [changeCid]
+          else pure []
+
+        pure TransferInstructionResult with
+          output = TransferInstructionResult_Completed with
+            receiverHoldingCids = [receiverCid]
+          senderChangeCids
+          meta = emptyMetadata
+
+-- | Consume a list of Holding contract IDs, archive them, and return the total amount.
+consumeHoldings : Party -> [ContractId Holding] -> Update Decimal
+consumeHoldings admin holdingCids = do
+  foldl (\accM cid -> do
+    acc <- accM
+    holding <- fetch cid
+    let hv = view holding
+    assertMsg "Holding admin mismatch" (hv.instrumentId.admin == admin)
+    assertMsg "Holding instrument must be FSB" (hv.instrumentId.id == "FSB")
+    archive cid
+    pure (acc + hv.amount)
+    ) (pure 0.0) holdingCids

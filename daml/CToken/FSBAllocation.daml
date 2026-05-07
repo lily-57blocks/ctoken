@@ -1,0 +1,86 @@
+-- | FSB allocation support implementing CIP-56 Allocation interface for DVP settlement.
+-- Allocations lock holdings to a settlement and enable atomic multi-asset transfers.
+module CToken.FSBAllocation where
+
+import DA.Foldable (mapA_)
+
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.HoldingV1
+import Splice.Api.Token.AllocationV1
+
+import CToken.FSBHolding (FSBHolding(..))
+
+template FSBAllocation
+  with
+    admin : Party
+    sender : Party
+    receiver : Party
+    amount : Decimal
+    transferLegId : Text
+    settlement : SettlementInfo
+    lockedHoldingCids : [ContractId Holding]
+    meta : Metadata
+  where
+    signatory admin, sender
+
+    interface instance Allocation for FSBAllocation where
+      view = AllocationView with
+        allocation = AllocationSpecification with
+          transferLegId
+          transferLeg = TransferLeg with
+            sender
+            receiver
+            amount
+            instrumentId = InstrumentId with admin; id = "FSB"
+            meta
+          settlement
+        holdingCids = lockedHoldingCids
+        meta
+
+      allocation_executeTransferImpl _self Allocation_ExecuteTransfer{..} = do
+        mapA_ archive lockedHoldingCids
+
+        receiverCid <- toInterfaceContractId <$>
+          create FSBHolding with
+            admin
+            owner = receiver
+            amount
+            lock = None
+            meta = emptyMetadata
+
+        pure Allocation_ExecuteTransferResult with
+          receiverHoldingCids = [receiverCid]
+          senderHoldingCids = []
+          meta = emptyMetadata
+
+      allocation_cancelImpl _self Allocation_Cancel{..} = do
+        senderCids <- unlockHoldings admin lockedHoldingCids sender
+        pure Allocation_CancelResult with
+          senderHoldingCids = senderCids
+          meta = emptyMetadata
+
+      allocation_withdrawImpl _self Allocation_Withdraw{..} = do
+        senderCids <- unlockHoldings admin lockedHoldingCids sender
+        pure Allocation_WithdrawResult with
+          senderHoldingCids = senderCids
+          meta = emptyMetadata
+
+unlockHoldings : Party -> [ContractId Holding] -> Party -> Update [ContractId Holding]
+unlockHoldings admin holdingCids owner = do
+  total <- foldl (\accM cid -> do
+    acc <- accM
+    holding <- fetch cid
+    let hv = view holding
+    archive cid
+    pure (acc + hv.amount)
+    ) (pure 0.0) holdingCids
+  if total > 0.0
+  then do
+    cid <- toInterfaceContractId <$> create FSBHolding with
+      admin
+      owner
+      amount = total
+      lock = None
+      meta = emptyMetadata
+    pure [cid]
+  else pure []

@@ -1,0 +1,56 @@
+-- | FSB token issuer contract for initial minting.
+-- The admin (AppProvider) uses this to mint the fixed supply of 1,000,000 FSB tokens.
+module CToken.FSBIssuer where
+
+import DA.TextMap as TextMap
+
+import Splice.Api.Token.MetadataV1
+
+import CToken.FSBHolding (FSBHolding(..))
+
+-- | One-time issuer contract for minting FSB tokens.
+-- After minting, the contract is archived to enforce fixed supply.
+template FSBIssuer
+  with
+    admin : Party
+    totalSupply : Decimal
+    minted : Bool
+  where
+    signatory admin
+
+    ensure totalSupply > 0.0
+
+    -- Mint the entire supply to a specified recipient.
+    -- Can only be exercised once; the issuer contract is consumed.
+    choice FSBIssuer_Mint : ContractId FSBHolding
+      with
+        recipient : Party
+      controller admin
+      do
+        assertMsg "Already minted" (not minted)
+        create FSBHolding with
+          admin
+          owner = recipient
+          amount = totalSupply
+          lock = None
+          meta = Metadata with
+            values = TextMap.fromList
+              [ ("ctoken.fsb/event", "initial-mint")
+              , ("ctoken.fsb/totalSupply", show totalSupply)
+              ]
+
+    -- Split an existing holding into two holdings of specified amounts.
+    -- Useful for distributing tokens from the initial mint.
+    nonconsuming choice FSBIssuer_Split : (ContractId FSBHolding, ContractId FSBHolding)
+      with
+        holdingCid : ContractId FSBHolding
+        splitAmount : Decimal
+      controller admin
+      do
+        holding <- fetch holdingCid
+        assertMsg "Split amount must be positive" (splitAmount > 0.0)
+        assertMsg "Split amount exceeds holding" (splitAmount < holding.amount)
+        archive holdingCid
+        cid1 <- create holding with amount = splitAmount
+        cid2 <- create holding with amount = holding.amount - splitAmount
+        pure (cid1, cid2)

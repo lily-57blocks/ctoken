@@ -1,0 +1,42 @@
+-- | FSB token holding implementing the CIP-56 Holding interface.
+-- Each FSBHolding represents a specific amount of FSB owned by a party.
+-- The admin (AppProvider) is the instrument registry operator.
+module CToken.FSBHolding where
+
+import Splice.Api.Token.MetadataV1
+import Splice.Api.Token.HoldingV1
+
+template FSBHolding
+  with
+    admin : Party
+    owner : Party
+    amount : Decimal
+    lock : Optional Lock
+    meta : Metadata
+  where
+    signatory admin
+    observer owner
+
+    ensure amount > 0.0
+
+    choice FSBHolding_Transfer : (ContractId FSBHolding, Optional (ContractId FSBHolding))
+      with
+        recipient : Party
+        transferAmount : Decimal
+      controller admin
+      do
+        assertMsg "Transfer amount must be positive" (transferAmount > 0.0)
+        assertMsg "Insufficient balance" (transferAmount <= amount)
+        receiverCid <- create this with owner = recipient; amount = transferAmount; meta = emptyMetadata
+        changeCid <- if transferAmount < amount
+          then Some <$> create this with amount = amount - transferAmount; meta = emptyMetadata
+          else pure None
+        pure (receiverCid, changeCid)
+
+    interface instance Holding for FSBHolding where
+      view = HoldingView with
+        owner
+        instrumentId = InstrumentId with admin; id = "FSB"
+        amount
+        lock
+        meta
